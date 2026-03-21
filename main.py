@@ -1,531 +1,965 @@
-# Copyright © 2020. All rights reserved.
-# Authors: Vitalii Babenko
-# Contacts: vbabenko2191@gmail.com
+"""Self-organization forest for binary classification of liver tissue.
 
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
+Builds a custom Random Forest-like ensemble of threshold-based decision trees
+from ultrasound image features. For each sensor type, the algorithm:
+1. Splits training data 75/25 into train/test subsets
+2. Grows a forest by iteratively finding optimal thresholds per feature
+3. Selects the best-performing sub-forest on the exam sample via F-score
+4. Reports accuracy, sensitivity, and specificity on exam and validation sets
+
+Master thesis project — Igor Sikorsky Kyiv Polytechnic Institute.
+Copyright 2020. All rights reserved.
+Authors: Vitalii Babenko
+Contacts: vbabenko2191@gmail.com
+"""
+
+from __future__ import annotations
+
 import copy
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+POSITIVE_CLASS = 1
+NEGATIVE_CLASS = 2
+
+FIRST_BRANCH = 1
+SECOND_BRANCH = 2
+
+CLASS_COLUMN = "class"
+TRAIN_FILE_SUFFIX = "(train).xlsx"
+EXAM_FILE_SUFFIX = "(exam).xlsx"
+VALIDATION_FILE_SUFFIX = "(validation).xlsx"
+
+TEST_SIZE = 0.25
+RANDOM_STATE = 0
+METRIC_CLASS_WEIGHT = 0.5
+
+# WEIGHT_LIST = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
+WEIGHT_LIST = [0.9]
+SENSOR_LIST = ["convex", "linear", "reinforced", "xmixed", "ymixed"]
+FEATURE_LIMIT_LIST = [3, 6, 7, 7, 7]
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
 
-# Getting new Xi and y of first side
-def get_X1_y1(X_train, y_train, X_test, y_test, index, threshold, side):
-    X1_train = []
-    y1_train = []
-    for i in range(y_train.shape[0]):
-        if side == 1:
-            if X_train[i, index] < threshold:
-                X1_train.append(X_train[i])
-                y1_train.append(y_train[i])
-        else:
-            if X_train[i, index] >= threshold:
-                X1_train.append(X_train[i])
-                y1_train.append(y_train[i])
-    X1_train = np.asarray(X1_train)
-    y1_train = np.asarray(y1_train)
-    X1_test = []
-    y1_test = []
-    for i in range(y_test.shape[0]):
-        if side == 1:
-            if X_test[i, index] < threshold:
-                X1_test.append(X_test[i])
-                y1_test.append(y_test[i])
-        else:
-            if X_test[i, index] >= threshold:
-                X1_test.append(X_test[i])
-                y1_test.append(y_test[i])
-    X1_test = np.asarray(X1_test)
-    y1_test = np.asarray(y1_test)
-    return X1_train, y1_train, X1_test, y1_test
+@dataclass(frozen=True, slots=True)
+class DatasetSplit:
+    """Train and test arrays for one tree-expansion subset."""
+
+    X_train: np.ndarray
+    y_train: np.ndarray
+    X_test: np.ndarray
+    y_test: np.ndarray
 
 
-# Getting new Xi and y of second side
-def get_X2_y2(X_train, y_train, X_test, y_test, index, threshold, side):
-    X2_train = []
-    y2_train = []
-    for i in range(y_train.shape[0]):
-        if side == 2:
-            if X_train[i, index] < threshold:
-                X2_train.append(X_train[i])
-                y2_train.append(y_train[i])
-        else:
-            if X_train[i, index] >= threshold:
-                X2_train.append(X_train[i])
-                y2_train.append(y_train[i])
-    X2_train = np.asarray(X2_train)
-    y2_train = np.asarray(y2_train)
-    X2_test = []
-    y2_test = []
-    for i in range(y_test.shape[0]):
-        if side == 2:
-            if X_test[i, index] < threshold:
-                X2_test.append(X_test[i])
-                y2_test.append(y_test[i])
-        else:
-            if X_test[i, index] >= threshold:
-                X2_test.append(X_test[i])
-                y2_test.append(y_test[i])
-    X2_test = np.asarray(X2_test)
-    y2_test = np.asarray(y2_test)
-    return X2_train, y2_train, X2_test, y2_test
+@dataclass(frozen=True, slots=True)
+class ThresholdResult:
+    """Best threshold and quality statistics for one feature."""
+
+    threshold: float
+    value: float
+    side: int
+    false_positives: int
+    false_negatives: int
 
 
-# Finding best threshold of single Xi
-def find_threshold_of_x(xx, col, y, num_of_pos, num_of_neg):
-    threshold_list = []
-    TP1_list = []
-    TN1_list = []
-    TP2_list = []
-    TN2_list = []
-    value_list1 = []
-    value_list2 = []
-    if xx.shape[0] > 2:
-        for j in range(1, xx.shape[0] - 1):
-            TP1 = 0  # number of True Positive
-            TN1 = 0  # number of True Negative
-            TP2 = 0
-            TN2 = 0
-            for z in range(col.shape[0]):
-                if col[z] < xx[j]:
-                    if y[z] == 1:
-                        TP1 += 1
-                    else:
-                        TN2 += 1
-                else:
-                    if y[z] == 2:
-                        TN1 += 1
-                    else:
-                        TP2 += 1
-            threshold_list.append(xx[j])
-            TP1_list.append(TP1)
-            TN1_list.append(TN1)
-            TP2_list.append(TP2)
-            TN2_list.append(TN2)
-            if (num_of_pos != 0) and (num_of_neg != 0):
-                value_list1.append(((TP1 / num_of_pos) + (TN1 / num_of_neg)) / 2)
-                value_list2.append(((TP2 / num_of_pos) + (TN2 / num_of_neg)) / 2)
-            elif num_of_pos == 0:
-                value_list1.append(TN1 / num_of_neg)
-                value_list2.append(TN2 / num_of_neg)
-            else:
-                value_list1.append(TP1 / num_of_pos)
-                value_list2.append(TP2 / num_of_pos)
+@dataclass(frozen=True, slots=True)
+class ThresholdCollection:
+    """Threshold search results for every feature in a dataset split."""
+
+    thresholds: list[float]
+    sides: list[int]
+    false_positives: list[int]
+    false_negatives: list[int]
+    train_values: np.ndarray
+    test_values: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class TreeNode:
+    """One threshold node inside a tree path."""
+
+    feature: str
+    side: int
+    threshold: float
+    train_value: float
+    test_value: float
+    false_positives: int
+    false_negatives: int
+    leaf_number: int
+    level_number: int
+    previous_leaf: int
+    previous_side: int
+
+
+@dataclass(slots=True)
+class ForestTree:
+    """Ordered node path that defines one tree."""
+
+    nodes: list[TreeNode]
+
+
+@dataclass(slots=True)
+class PendingBranches:
+    """Mutable queues for subsets that still need tree expansion."""
+
+    X_train_list: list[np.ndarray]
+    y_train_list: list[np.ndarray]
+    X_test_list: list[np.ndarray]
+    y_test_list: list[np.ndarray]
+    level_number_list: list[int]
+    previous_leaf_list: list[int]
+    previous_side_list: list[int]
+    tree_index_list: list[int]
+
+    def append(
+        self,
+        data_split: DatasetSplit,
+        level_number: int,
+        previous_leaf: int,
+        previous_side: int,
+        tree_index: int,
+    ) -> None:
+        """Append one pending branch expansion to the shared queues."""
+        self.X_train_list.append(data_split.X_train)
+        self.y_train_list.append(data_split.y_train)
+        self.X_test_list.append(data_split.X_test)
+        self.y_test_list.append(data_split.y_test)
+        self.level_number_list.append(level_number)
+        self.previous_leaf_list.append(previous_leaf)
+        self.previous_side_list.append(previous_side)
+        self.tree_index_list.append(tree_index)
+
+
+@dataclass(frozen=True, slots=True)
+class NodeExpansionContext:
+    """Metadata required when creating new nodes for one split."""
+
+    column_names: list[str]
+    test_weight: float
+    leaf_number: int
+    tree_index: int
+    level_number: int
+    previous_leaf: int
+    previous_side: int
+    max_tree_index: int
+    max_features: int
+
+
+# ---------------------------------------------------------------------------
+# Threshold helpers
+# ---------------------------------------------------------------------------
+
+
+def get_branch_mask(
+    feature_column: np.ndarray,
+    threshold: float,
+    side: int,
+    branch: int,
+) -> np.ndarray:
+    """Build the boolean mask for one branch of the threshold split.
+
+    Parameters
+    ----------
+    feature_column : array of feature values
+    threshold : split threshold
+    side : which side of the split was selected (FIRST_BRANCH or SECOND_BRANCH)
+    branch : which branch to select (FIRST_BRANCH or SECOND_BRANCH)
+
+    Returns
+    -------
+    Boolean mask selecting the rows that belong to *branch*.
+    """
+    if side == branch:
+        return feature_column < threshold
+    return feature_column >= threshold
+
+
+def get_branch_split(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    feature_index: int,
+    threshold: float,
+    side: int,
+    branch: int,
+) -> DatasetSplit:
+    """Return train and test subsets that belong to the requested branch.
+
+    Replaces the original ``get_X1_y1`` / ``get_X2_y2`` pair.
+
+    Parameters
+    ----------
+    X_train, y_train, X_test, y_test : current split arrays
+    feature_index : column index of the feature to split on
+    threshold : split threshold
+    side : which side was selected during threshold search
+    branch : FIRST_BRANCH or SECOND_BRANCH
+
+    Returns
+    -------
+    DatasetSplit with the filtered arrays.
+    """
+    train_mask = get_branch_mask(X_train[:, feature_index], threshold, side, branch)
+    test_mask = get_branch_mask(X_test[:, feature_index], threshold, side, branch)
+    return DatasetSplit(
+        X_train=X_train[train_mask],
+        y_train=y_train[train_mask],
+        X_test=X_test[test_mask],
+        y_test=y_test[test_mask],
+    )
+
+
+def calculate_value(
+    true_positive: int,
+    true_negative: int,
+    num_of_pos: int,
+    num_of_neg: int,
+) -> float:
+    """Calculate the balanced accuracy from TP / TN counts.
+
+    Parameters
+    ----------
+    true_positive, true_negative : correct-class counts
+    num_of_pos, num_of_neg : total class counts
+
+    Returns
+    -------
+    Balanced accuracy value (0..1).
+    """
+    if num_of_pos != 0 and num_of_neg != 0:
+        return ((true_positive / num_of_pos) + (true_negative / num_of_neg)) / 2
+    if num_of_pos == 0:
+        return true_negative / num_of_neg
+    return true_positive / num_of_pos
+
+
+def get_true_counts(
+    feature_column: np.ndarray,
+    labels: np.ndarray,
+    threshold: float,
+    side: int,
+) -> tuple[int, int]:
+    """Count true positives and true negatives for a fixed threshold side.
+
+    Parameters
+    ----------
+    feature_column : array of feature values
+    labels : class labels (POSITIVE_CLASS / NEGATIVE_CLASS)
+    threshold : split threshold
+    side : FIRST_BRANCH or SECOND_BRANCH
+
+    Returns
+    -------
+    (true_positive, true_negative) counts.
+    """
+    if side == FIRST_BRANCH:
+        positive_mask = feature_column < threshold
     else:
-        TP1 = 0
-        TN1 = 0
-        TP2 = 0
-        TN2 = 0
-        for z in range(col.shape[0]):
-            if col[z] < xx[1]:
-                if y[z] == 1:
-                    TP1 += 1
-                else:
-                    TN2 += 1
-            else:
-                if y[z] == 2:
-                    TN1 += 1
-                else:
-                    TP2 += 1
-        threshold_list.append(xx[1])
-        TP1_list.append(TP1)
-        TN1_list.append(TN1)
-        TP2_list.append(TP2)
-        TN2_list.append(TN2)
-        if num_of_pos > 0 and num_of_neg > 0:
-            value_list1.append(((TP1 / num_of_pos) + (TN1 / num_of_neg)) / 2)
-            value_list2.append(((TP2 / num_of_pos) + (TN2 / num_of_neg)) / 2)
-        elif num_of_pos == 0:
-            value_list1.append(TN1 / num_of_neg)
-            value_list2.append(TN2 / num_of_neg)
-        else:
-            value_list1.append(TP1 / num_of_pos)
-            value_list2.append(TP1 / num_of_pos)
-    if max(value_list1) > max(value_list2):
-        threshold = threshold_list[value_list1.index(max(value_list1))]
-        TP = TP1_list[value_list1.index(max(value_list1))]
-        TN = TN1_list[value_list1.index(max(value_list1))]
-        value = max(value_list1)
-        side = 1
+        positive_mask = feature_column >= threshold
+    negative_mask = ~positive_mask
+
+    true_positive = int(np.sum(positive_mask & (labels == POSITIVE_CLASS)))
+    true_negative = int(np.sum(negative_mask & (labels == NEGATIVE_CLASS)))
+    return true_positive, true_negative
+
+
+# ---------------------------------------------------------------------------
+# Threshold search
+# ---------------------------------------------------------------------------
+
+
+def find_threshold_of_x(
+    sorted_values: np.ndarray,
+    feature_column: np.ndarray,
+    labels: np.ndarray,
+    num_of_pos: int,
+    num_of_neg: int,
+) -> ThresholdResult:
+    """Find the best threshold, side, and error counts for one feature.
+
+    Parameters
+    ----------
+    sorted_values : feature values sorted ascending
+    feature_column : unsorted feature values (for counting)
+    labels : class labels
+    num_of_pos, num_of_neg : total class counts
+
+    Returns
+    -------
+    ThresholdResult with the best threshold, value, side, FP, FN.
+    """
+    threshold_list: list[float] = []
+    tp_side_one_list: list[int] = []
+    tn_side_one_list: list[int] = []
+    tp_side_two_list: list[int] = []
+    tn_side_two_list: list[int] = []
+    value_side_one_list: list[float] = []
+    value_side_two_list: list[float] = []
+
+    if sorted_values.shape[0] > 2:
+        threshold_indexes = range(1, sorted_values.shape[0] - 1)
     else:
-        threshold = threshold_list[value_list2.index(max(value_list2))]
-        TP = TP2_list[value_list2.index(max(value_list2))]
-        TN = TN2_list[value_list2.index(max(value_list2))]
-        value = max(value_list2)
-        side = 2
-    FP = num_of_pos - TP  # number of False Positive
-    FN = num_of_neg - TN  # number of False Negative
-    return threshold, value, side, FP, FN
+        threshold_indexes = [1]
 
+    single_threshold_case = sorted_values.shape[0] <= 2
 
-# Finding threshold of each Xi
-def find_thresholds(X_train, y_train, X_test, y_test):
-    num_of_pos = np.sum(y_train == 1)  # number of positive objects (norma)
-    num_of_neg = np.sum(y_train == 2)  # number of negative objects (pathology)
-    threshold_list = []
-    train_value_list = []
-    side_list = []
-    FP_list = []
-    FN_list = []
-    for i in range(X_train.shape[1]):
-        col = X_train[:, i]
-        xx = copy.deepcopy(col)  # make copy of Xi to not change initial list
-        xx.sort()
+    for threshold_index in threshold_indexes:
+        threshold = sorted_values[threshold_index]
 
-        # get threshold of Xi, its value on train sample and side of threshold
-        threshold, train_value, side, FP, FN = find_threshold_of_x(xx, col, y_train, num_of_pos, num_of_neg)
+        tp_side_one, tn_side_one = get_true_counts(
+            feature_column, labels, threshold, FIRST_BRANCH,
+        )
+        tp_side_two, tn_side_two = get_true_counts(
+            feature_column, labels, threshold, SECOND_BRANCH,
+        )
 
         threshold_list.append(threshold)
-        train_value_list.append(train_value)
-        side_list.append(side)
-        FP_list.append(FP)
-        FN_list.append(FN)
-    train_value_list = np.asarray(train_value_list)
+        tp_side_one_list.append(tp_side_one)
+        tn_side_one_list.append(tn_side_one)
+        tp_side_two_list.append(tp_side_two)
+        tn_side_two_list.append(tn_side_two)
 
-    # get value of thresholds on test sample
-    num_of_pos = np.sum(y_test == 1)
-    num_of_neg = np.sum(y_test == 2)
-    test_value_list = []
+        value_side_one = calculate_value(
+            tp_side_one, tn_side_one, num_of_pos, num_of_neg,
+        )
+
+        if single_threshold_case and num_of_pos > 0 and num_of_neg == 0:
+            # BUG PRESERVED: original line 142 uses TP1 instead of TP2.
+            # The else branch (num_of_neg == 0) in the single-threshold path
+            # computed value_list2 as TP1/num_of_pos rather than TP2/num_of_pos.
+            value_side_two = tp_side_one / num_of_pos
+        else:
+            value_side_two = calculate_value(
+                tp_side_two, tn_side_two, num_of_pos, num_of_neg,
+            )
+
+        value_side_one_list.append(value_side_one)
+        value_side_two_list.append(value_side_two)
+
+    best_side_one_value = max(value_side_one_list)
+    best_side_two_value = max(value_side_two_list)
+
+    if best_side_one_value > best_side_two_value:
+        best_index = value_side_one_list.index(best_side_one_value)
+        true_positive = tp_side_one_list[best_index]
+        true_negative = tn_side_one_list[best_index]
+        value = best_side_one_value
+        side = FIRST_BRANCH
+    else:
+        best_index = value_side_two_list.index(best_side_two_value)
+        true_positive = tp_side_two_list[best_index]
+        true_negative = tn_side_two_list[best_index]
+        value = best_side_two_value
+        side = SECOND_BRANCH
+
+    threshold = threshold_list[best_index]
+    false_positives = num_of_pos - true_positive
+    false_negatives = num_of_neg - true_negative
+    return ThresholdResult(
+        threshold=threshold,
+        value=value,
+        side=side,
+        false_positives=false_positives,
+        false_negatives=false_negatives,
+    )
+
+
+def find_thresholds(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> ThresholdCollection:
+    """Find the best threshold and value for every feature.
+
+    Parameters
+    ----------
+    X_train, y_train : training split
+    X_test, y_test : test split
+
+    Returns
+    -------
+    ThresholdCollection with per-feature threshold results and test values.
+    """
+    num_of_pos = int(np.sum(y_train == POSITIVE_CLASS))
+    num_of_neg = int(np.sum(y_train == NEGATIVE_CLASS))
+    threshold_list: list[float] = []
+    train_value_list: list[float] = []
+    side_list: list[int] = []
+    false_positive_list: list[int] = []
+    false_negative_list: list[int] = []
+
+    for feature_index in range(X_train.shape[1]):
+        feature_column = X_train[:, feature_index]
+        sorted_values = feature_column.copy()
+        sorted_values.sort()
+
+        result = find_threshold_of_x(
+            sorted_values, feature_column, y_train, num_of_pos, num_of_neg,
+        )
+        threshold_list.append(result.threshold)
+        train_value_list.append(result.value)
+        side_list.append(result.side)
+        false_positive_list.append(result.false_positives)
+        false_negative_list.append(result.false_negatives)
+
+    train_values = np.asarray(train_value_list)
+
+    # Evaluate thresholds on test split
+    num_of_pos = int(np.sum(y_test == POSITIVE_CLASS))
+    num_of_neg = int(np.sum(y_test == NEGATIVE_CLASS))
+
     if y_test.shape[0] > 0:
-        for i in range(X_test.shape[1]):
-            col = X_test[:, i]
-            TP = 0
-            TN = 0
-            for j in range(col.shape[0]):
-                if side_list[i] == 1:
-                    if col[j] < threshold_list[i]:
-                        if y_test[j] == 1:
-                            TP += 1
-                    else:
-                        if y_test[j] == 2:
-                            TN += 1
-                else:
-                    if col[j] >= threshold_list[i]:
-                        if y_test[j] == 1:
-                            TP += 1
-                    else:
-                        if y_test[j] == 2:
-                            TN += 1
-            if num_of_pos > 0 and num_of_neg > 0:
-                test_value_list.append(((TP / num_of_pos) + (TN / num_of_neg)) / 2)
-            elif num_of_pos == 0:
-                test_value_list.append(TN / num_of_neg)
-            else:
-                test_value_list.append(TP / num_of_pos)
-        test_value_list = np.asarray(test_value_list)
+        test_value_list: list[float] = []
+        for feature_index, threshold in enumerate(threshold_list):
+            feature_column = X_test[:, feature_index]
+            true_positive, true_negative = get_true_counts(
+                feature_column, y_test, threshold, side_list[feature_index],
+            )
+            test_value_list.append(
+                calculate_value(true_positive, true_negative, num_of_pos, num_of_neg)
+            )
+        test_values = np.asarray(test_value_list)
     else:
-        test_value_list = np.ones(X_train.shape[1])
-    return threshold_list, side_list, FP_list, FN_list, train_value_list, test_value_list
+        test_values = np.ones(X_train.shape[1])
+
+    return ThresholdCollection(
+        thresholds=threshold_list,
+        sides=side_list,
+        false_positives=false_positive_list,
+        false_negatives=false_negative_list,
+        train_values=train_values,
+        test_values=test_values,
+    )
 
 
-# Getting value of each feature on next level
-def get_value_on_next_level(Xtrain, ytrain, Xtest, ytest, test_weight):
-    threshold_list, side_list, FP_list, FN_list, train_value_list, test_value_list = find_thresholds(X_train=Xtrain,
-                                                                                                     y_train=ytrain,
-                                                                                                     X_test=Xtest,
-                                                                                                     y_test=ytest)
-    complex_value_list = (1 - test_weight) * train_value_list + test_weight * test_value_list
-    df = pd.DataFrame(
-        {'train_value': train_value_list,
-         'test_value': test_value_list,
-         'complex_value': complex_value_list})
-    df = df.sort_values(['complex_value', 'test_value', 'train_value'], ascending=[False, False, False])
-    return df['complex_value'].values[0]
+# ---------------------------------------------------------------------------
+# Feature ranking helpers
+# ---------------------------------------------------------------------------
 
 
-# Getting new nodes of tree
-def get_new_nodes(Xtrain, ytrain, Xtest, ytest, col_names, test_weight, Xtrain_list, ytrain_list, Xtest_list,
-                  ytest_list, lnl, pll, psl, til, leaf_number, tree_index, level_number, previous_leaf, previous_side,
-                  mti, F):
-    threshold_list, side_list, FP_list, FN_list, train_value_list, test_value_list = find_thresholds(X_train=Xtrain,
-                                                                                                     y_train=ytrain,
-                                                                                                     X_test=Xtest,
-                                                                                                     y_test=ytest)
-    if max(train_value_list) < 1.0:
-        value_list = []
-        for index in range(len(col_names)):
-            if FP_list[index] > 0:
-                X1_train, y1_train, X1_test, y1_test = get_X1_y1(Xtrain, ytrain, Xtest, ytest, index,
-                                                                 threshold_list[index], side_list[index])
-                if y1_train.shape[0] > 1:
-                    first_value = get_value_on_next_level(X1_train, y1_train, X1_test, y1_test, test_weight)
-                else:
-                    first_value = 0.0
+def build_complex_value_frame(
+    train_values: np.ndarray,
+    test_values: np.ndarray,
+    test_weight: float,
+) -> pd.DataFrame:
+    """Build the ranking DataFrame used to order features by quality.
+
+    Parameters
+    ----------
+    train_values, test_values : per-feature quality scores
+    test_weight : weight given to test performance (0..1)
+
+    Returns
+    -------
+    DataFrame sorted by complex_value descending.
+    """
+    complex_values = (1 - test_weight) * train_values + test_weight * test_values
+    frame = pd.DataFrame({
+        "train_value": train_values,
+        "test_value": test_values,
+        "complex_value": complex_values,
+    })
+    return frame.sort_values(
+        ["complex_value", "test_value", "train_value"],
+        ascending=[False, False, False],
+    )
+
+
+def get_value_on_next_level(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    test_weight: float,
+) -> float:
+    """Calculate the best complex feature value for the next tree level.
+
+    Parameters
+    ----------
+    X_train, y_train, X_test, y_test : current split
+    test_weight : weight for test performance
+
+    Returns
+    -------
+    Best complex value (float).
+    """
+    thresholds = find_thresholds(X_train, y_train, X_test, y_test)
+    frame = build_complex_value_frame(
+        thresholds.train_values, thresholds.test_values, test_weight,
+    )
+    return float(frame["complex_value"].values[0])
+
+
+def build_next_level_value_list(
+    data_split: DatasetSplit,
+    thresholds: ThresholdCollection,
+    test_weight: float,
+    num_features: int,
+) -> list[float]:
+    """Evaluate the average next-level value for every candidate feature.
+
+    Parameters
+    ----------
+    data_split : current train/test arrays
+    thresholds : per-feature threshold results
+    test_weight : weight for test performance
+    num_features : number of features to evaluate
+
+    Returns
+    -------
+    List of average values, one per feature.
+    """
+    value_list: list[float] = []
+    for feature_index in range(num_features):
+        if thresholds.false_positives[feature_index] > 0:
+            first_split = get_branch_split(
+                data_split.X_train, data_split.y_train,
+                data_split.X_test, data_split.y_test,
+                feature_index,
+                thresholds.thresholds[feature_index],
+                thresholds.sides[feature_index],
+                FIRST_BRANCH,
+            )
+            if first_split.y_train.shape[0] > 1:
+                first_value = get_value_on_next_level(
+                    first_split.X_train, first_split.y_train,
+                    first_split.X_test, first_split.y_test,
+                    test_weight,
+                )
             else:
-                first_value = 1.0
-            if FN_list[index] > 0:
-                X2_train, y2_train, X2_test, y2_test = get_X2_y2(Xtrain, ytrain, Xtest, ytest, index,
-                                                                 threshold_list[index], side_list[index])
-                if y2_train.shape[0] > 1:
-                    second_value = get_value_on_next_level(X2_train, y2_train, X2_test, y2_test, test_weight)
-                else:
-                    second_value = 0.0
-            else:
-                second_value = 1.0
-            value_list.append((first_value + second_value) / 2)
+                first_value = 0.0
+        else:
+            first_value = 1.0
 
-        # find indexes of F best features
-        df = pd.DataFrame({'value': value_list})
-        df = df.sort_values(['value'], ascending=[False])
+        if thresholds.false_negatives[feature_index] > 0:
+            second_split = get_branch_split(
+                data_split.X_train, data_split.y_train,
+                data_split.X_test, data_split.y_test,
+                feature_index,
+                thresholds.thresholds[feature_index],
+                thresholds.sides[feature_index],
+                SECOND_BRANCH,
+            )
+            if second_split.y_train.shape[0] > 1:
+                second_value = get_value_on_next_level(
+                    second_split.X_train, second_split.y_train,
+                    second_split.X_test, second_split.y_test,
+                    test_weight,
+                )
+            else:
+                second_value = 0.0
+        else:
+            second_value = 1.0
+
+        value_list.append((first_value + second_value) / 2)
+    return value_list
+
+
+# ---------------------------------------------------------------------------
+# Node and forest construction
+# ---------------------------------------------------------------------------
+
+
+def get_new_nodes(
+    data_split: DatasetSplit,
+    context: NodeExpansionContext,
+    pending: PendingBranches,
+) -> list[TreeNode]:
+    """Create the next set of tree nodes and queue their child branches.
+
+    Parameters
+    ----------
+    data_split : current train/test arrays for this node
+    context : metadata (feature names, weights, leaf/level tracking)
+    pending : mutable queues for branches that still need expansion
+
+    Returns
+    -------
+    List of TreeNode objects (one per selected feature, up to max_features).
+    """
+    thresholds = find_thresholds(
+        data_split.X_train, data_split.y_train,
+        data_split.X_test, data_split.y_test,
+    )
+
+    if max(thresholds.train_values) < 1.0:
+        value_list = build_next_level_value_list(
+            data_split, thresholds, context.test_weight, len(context.column_names),
+        )
+        ranking_frame = pd.DataFrame({"value": value_list}).sort_values(
+            ["value"], ascending=[False],
+        )
     else:
-        complex_value_list = (1 - test_weight) * train_value_list + test_weight * test_value_list
-        df = pd.DataFrame(
-            {'train_value': train_value_list,
-             'test_value': test_value_list,
-             'complex_value': complex_value_list})
-        df = df.sort_values(['complex_value', 'test_value', 'train_value'], ascending=[False, False, False])
-    index_list = df.index.tolist()[:F]
-    node_list = []
-    temp = 0
-    for index in index_list:
-        node = []
-        node.append(col_names[index])  # best feature
-        node.append(side_list[index])  # side of threshold
-        node.append(threshold_list[index])  # threshold value
-        node.append(train_value_list[index])  # train value
-        node.append(test_value_list[index])  # test value
-        node.append(FP_list[index])  # number of False Positive
-        if FP_list[index] > 0:
-            X1_train, y1_train, X1_test, y1_test = get_X1_y1(Xtrain, ytrain, Xtest, ytest, index,
-                                                             threshold_list[index], side_list[index])
-            if y1_train.shape[0] > 1:
-                Xtrain_list.append(X1_train)
-                ytrain_list.append(y1_train)
-                Xtest_list.append(X1_test)
-                ytest_list.append(y1_test)
-                lnl.append(level_number)
-                pll.append(leaf_number)
-                psl.append(1)
-                if temp == 0:
-                    til.append(tree_index)
-                else:
-                    til.append(mti)
+        ranking_frame = build_complex_value_frame(
+            thresholds.train_values, thresholds.test_values, context.test_weight,
+        )
 
-        node.append(FN_list[index])  # number of False Negative
-        if FN_list[index] > 0:
-            X2_train, y2_train, X2_test, y2_test = get_X2_y2(Xtrain, ytrain, Xtest, ytest, index,
-                                                             threshold_list[index], side_list[index])
-            if y2_train.shape[0] > 1:
-                Xtrain_list.append(X2_train)
-                ytrain_list.append(y2_train)
-                Xtest_list.append(X2_test)
-                ytest_list.append(y2_test)
-                lnl.append(level_number)
-                pll.append(leaf_number)
-                psl.append(2)
-                if temp == 0:
-                    til.append(tree_index)
-                else:
-                    til.append(mti)
+    index_list = ranking_frame.index.tolist()[: context.max_features]
+    node_list: list[TreeNode] = []
+    max_tree_index = context.max_tree_index
+    temp_index = 0
 
-        node.append(leaf_number)  # current leaf number
-        node.append(level_number)  # current level number
-        node.append(previous_leaf)  # previous leaf number
-        node.append(previous_side)  # previous side
-        node_list.append(node)
-        mti += 1
-        temp += 1
-    return node_list, Xtrain_list, ytrain_list, Xtest_list, ytest_list, lnl, pll, psl
+    for feature_index in index_list:
+        side = thresholds.sides[feature_index]
+        threshold = thresholds.thresholds[feature_index]
+        false_positives = thresholds.false_positives[feature_index]
+        false_negatives = thresholds.false_negatives[feature_index]
+
+        if false_positives > 0:
+            first_split = get_branch_split(
+                data_split.X_train, data_split.y_train,
+                data_split.X_test, data_split.y_test,
+                feature_index, threshold, side, FIRST_BRANCH,
+            )
+            if first_split.y_train.shape[0] > 1:
+                pending.append(
+                    data_split=first_split,
+                    level_number=context.level_number,
+                    previous_leaf=context.leaf_number,
+                    previous_side=FIRST_BRANCH,
+                    tree_index=(
+                        context.tree_index if temp_index == 0 else max_tree_index
+                    ),
+                )
+
+        if false_negatives > 0:
+            second_split = get_branch_split(
+                data_split.X_train, data_split.y_train,
+                data_split.X_test, data_split.y_test,
+                feature_index, threshold, side, SECOND_BRANCH,
+            )
+            if second_split.y_train.shape[0] > 1:
+                pending.append(
+                    data_split=second_split,
+                    level_number=context.level_number,
+                    previous_leaf=context.leaf_number,
+                    previous_side=SECOND_BRANCH,
+                    tree_index=(
+                        context.tree_index if temp_index == 0 else max_tree_index
+                    ),
+                )
+
+        node_list.append(TreeNode(
+            feature=context.column_names[feature_index],
+            side=side,
+            threshold=threshold,
+            train_value=float(thresholds.train_values[feature_index]),
+            test_value=float(thresholds.test_values[feature_index]),
+            false_positives=false_positives,
+            false_negatives=false_negatives,
+            leaf_number=context.leaf_number,
+            level_number=context.level_number,
+            previous_leaf=context.previous_leaf,
+            previous_side=context.previous_side,
+        ))
+        max_tree_index += 1
+        temp_index += 1
+
+    return node_list
 
 
-# Finding best tree
-def get_forest(test_weight, X_train, y_train, X_test, y_test, col_names, F):
-    tree_list = []
-    leaf_number = 1  # first leaf number
-    level_number = 1  # first level number
-    tree_index = 0  # first tree index
-    Xtrain_list = []
-    ytrain_list = []
-    Xtest_list = []
-    ytest_list = []
-    lnl = []  # level number list
-    pll = []  # previous leaf list
-    psl = []  # previous side list
-    til = []  # tree index list
-    F_counter = 0
-    node_list, Xtrain_list, ytrain_list, Xtest_list, ytest_list, lnl, pll, psl = get_new_nodes(X_train, y_train,
-                                                                                               X_test, y_test,
-                                                                                               col_names,
-                                                                                               test_weight,
-                                                                                               Xtrain_list,
-                                                                                               ytrain_list,
-                                                                                               Xtest_list,
-                                                                                               ytest_list, lnl, pll,
-                                                                                               psl, til,
-                                                                                               leaf_number,
-                                                                                               tree_index,
-                                                                                               level_number, 0, 0,
-                                                                                               0, F)
-    for new_node in node_list:
-        tree_list.append(new_node)
-    count_list = np.zeros(F)
-    i = 0
-    while i < len(pll):
-        Xtrain = Xtrain_list[i]
-        ytrain = ytrain_list[i]
-        Xtest = Xtest_list[i]
-        ytest = ytest_list[i]
+def get_forest(
+    test_weight: float,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    column_names: list[str],
+    max_features: int,
+) -> list[ForestTree]:
+    """Grow the forest by repeatedly expanding queued branches.
+
+    Parameters
+    ----------
+    test_weight : weight for test performance in feature ranking
+    X_train, y_train, X_test, y_test : train/test split
+    column_names : feature names from the training DataFrame
+    max_features : maximum features (F) selected per level
+
+    Returns
+    -------
+    List of ForestTree objects.
+    """
+    tree_list: list[ForestTree] = []
+    leaf_number = 1
+    level_number = 1
+    tree_index = 0
+
+    pending = PendingBranches(
+        X_train_list=[], y_train_list=[],
+        X_test_list=[], y_test_list=[],
+        level_number_list=[], previous_leaf_list=[],
+        previous_side_list=[], tree_index_list=[],
+    )
+
+    root_split = DatasetSplit(
+        X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test,
+    )
+    root_nodes = get_new_nodes(
+        data_split=root_split,
+        context=NodeExpansionContext(
+            column_names=column_names,
+            test_weight=test_weight,
+            leaf_number=leaf_number,
+            tree_index=tree_index,
+            level_number=level_number,
+            previous_leaf=0,
+            previous_side=0,
+            max_tree_index=0,
+            max_features=max_features,
+        ),
+        pending=pending,
+    )
+    for node in root_nodes:
+        tree_list.append(ForestTree(nodes=[node]))
+
+    count_list = np.zeros(max_features)
+    queue_index = 0
+
+    while queue_index < len(pending.previous_leaf_list):
+        branch_split = DatasetSplit(
+            X_train=pending.X_train_list[queue_index],
+            y_train=pending.y_train_list[queue_index],
+            X_test=pending.X_test_list[queue_index],
+            y_test=pending.y_test_list[queue_index],
+        )
         leaf_number += 1
-        level_number = lnl[i] + 1
-        previous_leaf = pll[i]
-        previous_side = psl[i]
-        tree_index = til[i]
-        mti = max(til)  # max tree index
-        node_list, Xtrain_list, ytrain_list, Xtest_list, ytest_list, lnl, pll, psl = get_new_nodes(Xtrain, ytrain,
-                                                                                                   Xtest, ytest,
-                                                                                                   col_names,
-                                                                                                   test_weight,
-                                                                                                   Xtrain_list,
-                                                                                                   ytrain_list,
-                                                                                                   Xtest_list,
-                                                                                                   ytest_list, lnl,
-                                                                                                   pll, psl, til,
-                                                                                                   leaf_number,
-                                                                                                   tree_index,
-                                                                                                   level_number,
-                                                                                                   previous_leaf,
-                                                                                                   previous_side,
-                                                                                                   mti, F)
-        temp_tree = copy.deepcopy(tree_list[til[i]])
-        temp = 0
-        for new_node in node_list:
-            tree = []
-            if sum(count_list) < F ** 2:
-                if count_list[til[i]] < F:
-                    tree.append(temp_tree)
-                    count_list[til[i]] += 1
-                else:
-                    for node in temp_tree:
-                        tree.append(node)
+        level_number = pending.level_number_list[queue_index] + 1
+        previous_leaf = pending.previous_leaf_list[queue_index]
+        previous_side = pending.previous_side_list[queue_index]
+        tree_index = pending.tree_index_list[queue_index]
+        max_tree_index = max(pending.tree_index_list)
+
+        new_nodes = get_new_nodes(
+            data_split=branch_split,
+            context=NodeExpansionContext(
+                column_names=column_names,
+                test_weight=test_weight,
+                leaf_number=leaf_number,
+                tree_index=tree_index,
+                level_number=level_number,
+                previous_leaf=previous_leaf,
+                previous_side=previous_side,
+                max_tree_index=max_tree_index,
+                max_features=max_features,
+            ),
+            pending=pending,
+        )
+
+        temp_tree = copy.deepcopy(tree_list[tree_index].nodes)
+        temp_index = 0
+        for new_node in new_nodes:
+            tree_nodes = copy.deepcopy(temp_tree)
+            if np.sum(count_list) < max_features ** 2:
+                if count_list[tree_index] < max_features:
+                    count_list[tree_index] += 1
+            tree_nodes.append(new_node)
+            if temp_index == 0:
+                tree_list[tree_index] = ForestTree(nodes=tree_nodes)
             else:
-                for node in temp_tree:
-                    tree.append(node)
-            tree.append(new_node)
-            if temp == 0:
-                tree_list[til[i]] = tree
-            else:
-                tree_list.append(tree)
-            temp += 1
-        i += 1
+                tree_list.append(ForestTree(nodes=tree_nodes))
+            temp_index += 1
+
+        queue_index += 1
+
     return tree_list
 
 
-# Calculate exam value for forest
-def get_exam_value(tree_list, exam_data, y_exam):
-    num_of_pos = np.sum(y_exam == 1)
-    num_of_neg = np.sum(y_exam == 2)
-    count = 0
-    TP = 0
-    TN = 0
-    for i in range(exam_data.shape[0]):
-        obj = exam_data.loc[i]
-        ypl = []  # y_pred list
-        for tree in tree_list:
-            tree_df = pd.DataFrame(tree)
-            tree = tree_df.values
-            level = 1
-            index = 0
-            flag = False
-            y_pred = 0
-            while flag != True:
-                node = tree[index]
-                if node[1] == 1:
-                    if obj[node[0]] < node[2]:
-                        y_pred = 1
-                    else:
-                        y_pred = 2
-                else:
-                    if obj[node[0]] < node[2]:
-                        y_pred = 2
-                    else:
-                        y_pred = 1
-                if np.where((tree[:, 9] == level) & (tree[:, 10] == y_pred))[0].size > 0:
-                    index = np.where((tree[:, 9] == level) & (tree[:, 10] == y_pred))[0][0]
-                    level = tree[index, 7]
-                else:
-                    flag = True
-            ypl.append(y_pred)
-        ypl = np.asarray(ypl)
-        if np.sum(ypl == 1) > np.sum(ypl == 2):
-            y_pred = 1
-        else:
-            y_pred = 2
-        if y_exam[i] == y_pred:
-            count += 1
-            if y_exam[i] == 1:
-                TP += 1
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+
+def get_tree_prediction(tree: ForestTree, exam_object: pd.Series) -> int:
+    """Traverse one tree and return its predicted class for an exam object.
+
+    Parameters
+    ----------
+    tree : a single ForestTree
+    exam_object : one row from the exam DataFrame
+
+    Returns
+    -------
+    Predicted class (POSITIVE_CLASS or NEGATIVE_CLASS).
+    """
+    level = 1
+    node_index = 0
+    predicted_class = 0
+
+    while True:
+        node = tree.nodes[node_index]
+        if node.side == FIRST_BRANCH:
+            if exam_object[node.feature] < node.threshold:
+                predicted_class = POSITIVE_CLASS
             else:
-                TN += 1
-    return count / y_exam.shape[0], TP / num_of_pos, TN / num_of_neg
+                predicted_class = NEGATIVE_CLASS
+        else:
+            if exam_object[node.feature] < node.threshold:
+                predicted_class = NEGATIVE_CLASS
+            else:
+                predicted_class = POSITIVE_CLASS
+
+        # Find next node whose previous_leaf matches current level
+        # and previous_side matches the predicted class
+        next_node_index = None
+        for candidate_index, candidate in enumerate(tree.nodes):
+            if (
+                candidate.previous_leaf == level
+                and candidate.previous_side == predicted_class
+            ):
+                next_node_index = candidate_index
+                break
+
+        if next_node_index is None:
+            break
+        node_index = next_node_index
+        level = tree.nodes[node_index].leaf_number
+
+    return predicted_class
 
 
-# weight_list = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
-weight_list = [0.9]
-sensor_list = ['convex', 'linear', 'reinforced', 'xmixed', 'ymixed']
-F_list = [3, 6, 7, 7, 7]
-for i in range(len(sensor_list)):
-    sensor_type = sensor_list[i]
-    print('Sensor type: ', sensor_type)
+def get_exam_value(
+    tree_list: list[ForestTree],
+    exam_data: pd.DataFrame,
+    y_exam: np.ndarray,
+) -> tuple[float, float, float]:
+    """Calculate accuracy, sensitivity, and specificity for a forest.
 
-    F = F_list[i]
+    Parameters
+    ----------
+    tree_list : list of ForestTree objects
+    exam_data : exam DataFrame (features + class column)
+    y_exam : exam class labels
 
-    name_of_train = sensor_type + '(train).xlsx'  # train + test sample
-    name_of_exam = sensor_type + '(exam).xlsx'  # exam sample
-    name_of_validation = sensor_type + '(validation).xlsx'  # validation sample
+    Returns
+    -------
+    (accuracy, sensitivity, specificity) tuple.
+    """
+    num_of_pos = int(np.sum(y_exam == POSITIVE_CLASS))
+    num_of_neg = int(np.sum(y_exam == NEGATIVE_CLASS))
+    correct_count = 0
+    true_positive = 0
+    true_negative = 0
 
-    train_data = pd.read_excel(name_of_train)
-    exam_data = pd.read_excel(name_of_exam)
-    validate_data = pd.read_excel(name_of_validation)
+    for object_index in range(exam_data.shape[0]):
+        exam_object = exam_data.loc[object_index]
+        predictions = [get_tree_prediction(tree, exam_object) for tree in tree_list]
+        prediction_array = np.asarray(predictions)
 
-    col_names = list(train_data.columns[:-1])
+        if np.sum(prediction_array == POSITIVE_CLASS) > np.sum(
+            prediction_array == NEGATIVE_CLASS
+        ):
+            predicted_class = POSITIVE_CLASS
+        else:
+            predicted_class = NEGATIVE_CLASS
 
-    y = train_data['class'].values
-    X = train_data.drop(['class'], axis=1).values
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=0)
+        if y_exam[object_index] == predicted_class:
+            correct_count += 1
+            if y_exam[object_index] == POSITIVE_CLASS:
+                true_positive += 1
+            else:
+                true_negative += 1
 
-    y_exam = exam_data['class'].values
+    return (
+        correct_count / y_exam.shape[0],
+        true_positive / num_of_pos,
+        true_negative / num_of_neg,
+    )
 
-    y_val = validate_data['class'].values
 
-    best_value = 0
-    for test_weight in weight_list:
-        forest = get_forest(test_weight=test_weight, X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test,
-                            col_names=col_names, F=F)
-        tree_columns = ['feature', 'side', 'threshold', 'train_value', 'test_value', 'FP', 'FN', 'leaf_number',
-                        'level_number', 'previous_leaf', 'previous_side']
-        leaf_list = []
-        level_list = []
-        for tree in forest:
-            tree_df = pd.DataFrame(tree, columns=tree_columns)
-            leaf_list.append(max(tree_df['leaf_number']))
-            level_list.append(max(tree_df['level_number']))
-        criterion = pd.DataFrame(
-            {'number_of_leafs': leaf_list,
-             'number_of_levels': level_list})
-        criterion = criterion.sort_values(['number_of_leafs', 'number_of_levels'])
-        for t in range(1, 21):
-            t_best = criterion.index.tolist()[:t]
-            new_forest = []
-            for z in t_best:
-                new_forest.append(forest[z])
-            accuracy, sensitivity, specificity = get_exam_value(new_forest, exam_data, y_exam)
-            F_value = 0.5 * sensitivity + 0.5 * specificity
-            if F_value > best_value:
-                best_value = F_value
-                best_forest = copy.deepcopy(new_forest)
-                best_weight = test_weight
-                optimal_t = t
-                top_accuracy = accuracy
-                top_sensitivity = sensitivity
-                top_specificity = specificity
-    print('Exam result:')
-    print(' - Best weight: ', best_weight)
-    print(' - Optimal t: ', optimal_t)
-    print(' - Top accuracy: ', top_accuracy)
-    print(' - Top sensitivity: ', top_sensitivity)
-    print(' - Top specificty: ', top_specificity)
-    accuracy, sensitivity, specificity = get_exam_value(best_forest, validate_data, y_val)
-    print('Validation result:')
-    print(' - Accuracy: ', accuracy)
-    print(' - Sensitivity: ', sensitivity)
-    print(' - Specificity: ', specificity)
-    print()
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """Run the sensor-by-sensor training and evaluation workflow."""
+    for sensor_type, max_features in zip(SENSOR_LIST, FEATURE_LIMIT_LIST):
+        print("Sensor type: ", sensor_type)
+
+        train_data = pd.read_excel(sensor_type + TRAIN_FILE_SUFFIX)
+        exam_data = pd.read_excel(sensor_type + EXAM_FILE_SUFFIX)
+        validation_data = pd.read_excel(sensor_type + VALIDATION_FILE_SUFFIX)
+
+        column_names = list(train_data.columns[:-1])
+
+        labels = train_data[CLASS_COLUMN].values
+        features = train_data.drop([CLASS_COLUMN], axis=1).values
+        X_train, X_test, y_train, y_test = train_test_split(
+            features, labels, test_size=TEST_SIZE, random_state=RANDOM_STATE,
+        )
+
+        y_exam = exam_data[CLASS_COLUMN].values
+        y_validation = validation_data[CLASS_COLUMN].values
+
+        best_value = 0
+        for test_weight in WEIGHT_LIST:
+            forest = get_forest(
+                test_weight=test_weight,
+                X_train=X_train, y_train=y_train,
+                X_test=X_test, y_test=y_test,
+                column_names=column_names,
+                max_features=max_features,
+            )
+
+            leaf_list = [
+                max(node.leaf_number for node in tree.nodes) for tree in forest
+            ]
+            level_list = [
+                max(node.level_number for node in tree.nodes) for tree in forest
+            ]
+            criterion = pd.DataFrame({
+                "number_of_leafs": leaf_list,
+                "number_of_levels": level_list,
+            })
+            criterion = criterion.sort_values(["number_of_leafs", "number_of_levels"])
+
+            for forest_size in range(1, 21):
+                best_tree_indexes = criterion.index.tolist()[:forest_size]
+                sub_forest = [forest[idx] for idx in best_tree_indexes]
+                accuracy, sensitivity, specificity = get_exam_value(
+                    sub_forest, exam_data, y_exam,
+                )
+                f_value = (
+                    METRIC_CLASS_WEIGHT * sensitivity
+                    + METRIC_CLASS_WEIGHT * specificity
+                )
+                if f_value > best_value:
+                    best_value = f_value
+                    best_forest = copy.deepcopy(sub_forest)
+                    best_weight = test_weight
+                    optimal_t = forest_size
+                    top_accuracy = accuracy
+                    top_sensitivity = sensitivity
+                    top_specificity = specificity
+
+        print("Exam result:")
+        print(" - Best weight: ", best_weight)
+        print(" - Optimal t: ", optimal_t)
+        print(" - Top accuracy: ", top_accuracy)
+        print(" - Top sensitivity: ", top_sensitivity)
+        print(" - Top specificty: ", top_specificity)
+        accuracy, sensitivity, specificity = get_exam_value(
+            best_forest, validation_data, y_validation,
+        )
+        print("Validation result:")
+        print(" - Accuracy: ", accuracy)
+        print(" - Sensitivity: ", sensitivity)
+        print(" - Specificity: ", specificity)
+        print()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,12 @@
+# Claude
+.claude/
+.mcp.json
+
+# BMAD
+_bmad/
+_bmad-output/
+
+prompts/
+
+# Python
+__pycache__/
