@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Research reference implementation of Random Forest of Optimal-Complexity Trees"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["license"]
 authors = [
   { name = "Vitalii O. Babenko" },
 ]
@@ -30,6 +32,7 @@ dev = [
 
 [project.urls]
 Publication = "https://doi.org/10.1007/s10559-023-00569-z"
+Repository = "https://github.com/vbabenko97/RFOCT"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

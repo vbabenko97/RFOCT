@@ -1,7 +1,8 @@
 """Genetic feature selection for RFOCT trees."""
 
 # Derived from research code: Copyright © 2019-2023 Vitalii Babenko.
-# Historical notice: All rights reserved.
+# Originally carried an "All rights reserved" notice; released here under Apache-2.0 with
+# permission from the copyright holder.
 
 from __future__ import annotations
 

@@ -122,8 +122,8 @@ and a scikit-learn-style estimator API.
 
 The earlier SOF remains available in Git history:
 
-- [last refactored SOF snapshot (`1ca0a6f`)](https://github.com/vbabenko97/Self-Organization-Forest/tree/1ca0a6f5cc1deb879382a32e5440135be66f8b15)
-- [original uploaded SOF implementation (`64b6b0d`)](https://github.com/vbabenko97/Self-Organization-Forest/tree/64b6b0d3ccaf597ec28b8264a73c569dba63dcf1)
+- [last refactored SOF snapshot (`1ca0a6f`)](https://github.com/vbabenko97/RFOCT/tree/1ca0a6f5cc1deb879382a32e5440135be66f8b15)
+- [original uploaded SOF implementation (`64b6b0d`)](https://github.com/vbabenko97/RFOCT/tree/64b6b0d3ccaf597ec28b8264a73c569dba63dcf1)
 
 ## Publication and citation
 
@@ -161,9 +161,12 @@ Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff)
 - Reproducibility with a fixed `random_state` is tested within a fixed RFOCT and dependency
   environment; cross-version bit-for-bit reproducibility is not promised.
 - No benchmark claims or bundled medical/research datasets are provided by this repository.
-- Applicability of the repository's existing license to the legacy-derived RFOCT code has not
-  yet been established. Resolve code ownership and licensing before publishing a package or
-  release; this is a release blocker.
+
+## License
+
+RFOCT is distributed under the [Apache License 2.0](license). The copyright holder has
+confirmed that the legacy-derived RFOCT implementation included here may be distributed under
+this license.
 
 ## Development
 

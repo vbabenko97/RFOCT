@@ -3,6 +3,8 @@ message: "If you use RFOCT, please cite the associated journal article."
 title: "RFOCT: Random Forest of Optimal-Complexity Trees"
 type: software
 version: 0.1.0
+date-released: 2026-07-22
+repository-code: "https://github.com/vbabenko97/RFOCT"
 authors:
   - family-names: Babenko
     given-names: "Vitalii O."
