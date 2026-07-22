@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use RFOCT, please cite the associated journal article."
+title: "RFOCT: Random Forest of Optimal-Complexity Trees"
+type: software
+version: 0.1.0
+authors:
+  - family-names: Babenko
+    given-names: "Vitalii O."
+preferred-citation:
+  type: article
+  title: "Classification of Pathologies on Medical Images Using the Algorithm of Random Forest of Optimal-Complexity Trees"
+  authors:
+    - family-names: Babenko
+      given-names: "V."
+    - family-names: Nastenko
+      given-names: "Ie."
+    - family-names: Pavlov
+      given-names: "V."
+    - family-names: Horodetska
+      given-names: "O."
+    - family-names: Dykan
+      given-names: "I."
+    - family-names: Tarasiuk
+      given-names: "B."
+    - family-names: Lazoryshinets
+      given-names: "V."
+  doi: 10.1007/s10559-023-00569-z
+  journal: "Cybernetics and Systems Analysis"
+  volume: 59
+  issue: 2
+  start: 346
+  end: 358
+  year: 2023

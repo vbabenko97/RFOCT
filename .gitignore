@@ -1,12 +1,60 @@
-# Claude
 .claude/
+.codex/
 .mcp.json
-
-# BMAD
-_bmad/
-_bmad-output/
+AGENTS.md
 
 prompts/
 
 # Python
 __pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and package builds
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# OS and editor metadata
+.DS_Store
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+credentials*.json
+
+# Local research source and artifacts (kept locally, never packaged)
+/legacy-rfoct/
+/data/
+/datasets/
+/models/
+/reports/
+/artifacts/
+/research-artifacts/
+
+# Common research data and trained-model formats
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.xlsm
+*.parquet
+*.feather
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.joblib
+*.pkl
+*.pickle
+*.onnx
+*.pt
+*.pth
+*.ckpt
